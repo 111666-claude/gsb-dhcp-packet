@@ -21,45 +21,73 @@ type Option struct {
 // Counter 记录本轮检查过的选项条数。
 type Counter struct {
 	Scanned int
+	cache   map[string]parsedPacket
+}
+
+type parsedPacket struct {
+	options []Option
+	byCode  map[byte][]Option
 }
 
 // Parse 解析选项区。
 func Parse(data []byte, c *Counter) ([]Option, error) {
-	if len(data) < HeaderLen+MagicLen {
-		return nil, errors.New("too-short")
-	}
-	off := HeaderLen + MagicLen
-	out := []Option{}
-	seen := map[byte]bool{}
-	for off+1 < len(data) {
-		code := data[off]
-		length := int(data[off+1])
-		if off+2+length > len(data) {
-			return nil, errors.New("bad-option")
-		}
-		c.Scanned++
-		if seen[code] {
-			off += 2 + length
-			continue
-		}
-		seen[code] = true
-		out = append(out, Option{Code: code, Len: length, Data: data[off+2 : off+2+length]})
-		off += 2 + length
-	}
-	return out, nil
+	out, _, err := parseOptions(data, c)
+	return out, err
 }
 
 // Lookup 按 code 找选项。
 func Lookup(data []byte, code byte, c *Counter) ([]Option, error) {
-	options, err := Parse(data, c)
+	_, byCode, err := parseOptions(data, c)
 	if err != nil {
 		return nil, err
 	}
-	found := []Option{}
-	for _, opt := range options {
-		if opt.Code == code {
-			found = append(found, opt)
+	return byCode[code], nil
+}
+
+func parseOptions(data []byte, c *Counter) ([]Option, map[byte][]Option, error) {
+	if len(data) < HeaderLen+MagicLen {
+		return nil, nil, errors.New("too-short")
+	}
+	if c != nil {
+		if cached, ok := c.cache[string(data)]; ok {
+			return cached.options, cached.byCode, nil
 		}
 	}
-	return found, nil
+
+	off := HeaderLen + MagicLen
+	out := []Option{}
+	byCode := map[byte][]Option{}
+	for off < len(data) {
+		code := data[off]
+		off++
+		if code == EndCode {
+			break
+		}
+		if code == PadCode {
+			continue
+		}
+		if off >= len(data) {
+			return nil, nil, errors.New("bad-option")
+		}
+		length := int(data[off])
+		off++
+		if off+length > len(data) {
+			return nil, nil, errors.New("bad-option")
+		}
+		if c != nil {
+			c.Scanned++
+		}
+		opt := Option{Code: code, Len: length, Data: data[off : off+length]}
+		out = append(out, opt)
+		byCode[code] = append(byCode[code], opt)
+		off += length
+	}
+
+	if c != nil {
+		if c.cache == nil {
+			c.cache = map[string]parsedPacket{}
+		}
+		c.cache[string(data)] = parsedPacket{options: out, byCode: byCode}
+	}
+	return out, byCode, nil
 }
